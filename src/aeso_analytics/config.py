@@ -30,6 +30,21 @@ def _env_int(name: str, default: int) -> int:
     return int(value)
 
 
+def _env_float(name: str, default: float) -> float:
+    value = os.getenv(name)
+    if value is None or value.strip() == "":
+        return default
+    return float(value)
+
+
+def _env_optional_int(name: str, default: int | None) -> int | None:
+    value = os.getenv(name)
+    if value is None or value.strip() == "":
+        return default
+    parsed = int(value)
+    return parsed if parsed > 0 else None
+
+
 @dataclass(frozen=True)
 class WarehouseConfig:
     host: str
@@ -71,6 +86,28 @@ class IngestionConfig:
     data_source: str
     sample_data: SampleDataConfig
     external_features: ExternalFeatureConfig
+
+
+@dataclass(frozen=True)
+class BacktestConfig:
+    enabled: bool
+    mode: str
+    min_train_days: int
+    rolling_train_days: int
+    min_test_days: int
+    min_train_rows: int
+    min_test_rows: int
+    max_windows: int | None
+
+
+@dataclass(frozen=True)
+class PromotionRuleConfig:
+    primary_metric: str
+    minimum_relative_improvement: float
+    max_peak_mae_regression: float
+    max_underprediction_rate_regression: float
+    minimum_win_rate: float
+    minimum_valid_windows: int
 
 
 def _default_sample_data_config() -> SampleDataConfig:
@@ -138,4 +175,42 @@ def get_ingestion_config() -> IngestionConfig:
         data_source="sample" if sample_cfg.use_sample_data else "historical_csv",
         sample_data=sample_cfg,
         external_features=external_features,
+    )
+
+
+def get_backtest_config() -> BacktestConfig:
+    mode = os.getenv("MODEL_BACKTEST_MODE", "").strip().lower() or "expanding"
+    if mode not in {"expanding", "rolling"}:
+        raise ValueError("MODEL_BACKTEST_MODE must be either 'expanding' or 'rolling'")
+
+    return BacktestConfig(
+        enabled=_env_bool("MODEL_BACKTEST_ENABLED", True),
+        mode=mode,
+        min_train_days=_env_int("MODEL_BACKTEST_MIN_TRAIN_DAYS", 90),
+        rolling_train_days=_env_int("MODEL_BACKTEST_ROLLING_TRAIN_DAYS", 180),
+        min_test_days=_env_int("MODEL_BACKTEST_MIN_TEST_DAYS", 7),
+        min_train_rows=_env_int("MODEL_BACKTEST_MIN_TRAIN_ROWS", 168),
+        min_test_rows=_env_int("MODEL_BACKTEST_MIN_TEST_ROWS", 24),
+        max_windows=_env_optional_int("MODEL_BACKTEST_MAX_WINDOWS", 6),
+    )
+
+
+def get_promotion_rule_config() -> PromotionRuleConfig:
+    primary_metric = os.getenv("MODEL_PROMOTION_PRIMARY_METRIC", "").strip().lower() or "mae"
+    if primary_metric not in {"mae", "rmse"}:
+        raise ValueError("MODEL_PROMOTION_PRIMARY_METRIC must be either 'mae' or 'rmse'")
+
+    return PromotionRuleConfig(
+        primary_metric=primary_metric,
+        minimum_relative_improvement=_env_float(
+            "MODEL_PROMOTION_MIN_RELATIVE_IMPROVEMENT",
+            0.0,
+        ),
+        max_peak_mae_regression=_env_float("MODEL_PROMOTION_MAX_PEAK_MAE_REGRESSION", 0.05),
+        max_underprediction_rate_regression=_env_float(
+            "MODEL_PROMOTION_MAX_UNDERPREDICTION_RATE_REGRESSION",
+            0.02,
+        ),
+        minimum_win_rate=_env_float("MODEL_PROMOTION_MIN_WIN_RATE", 0.5),
+        minimum_valid_windows=_env_int("MODEL_PROMOTION_MIN_WINDOWS", 3),
     )

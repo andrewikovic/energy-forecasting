@@ -26,7 +26,7 @@ Schemas:
 - `staging`: deduplicated and typed source models.
 - `intermediate`: hourly load, price, calendar, holiday, lag, rolling, weather forecast, generation availability, and intertie features.
 - `marts`: training, market overview, and peak demand marts.
-- `ml`: model registry, forecast results, model performance, and feature importance.
+- `ml`: model registry, forecast results, model performance, feature importance, backtest results, and promotion decisions.
 
 ## Setup
 
@@ -68,9 +68,64 @@ What each command does:
 - `make ingest`: loads the configured AESO data source and writes `raw.raw_aeso_load`, `raw.raw_aeso_pool_price`, and optional known-as-of feature raw tables when sample fixtures or CSV paths are configured.
 - `make dbt-run`: builds staging, intermediate, and marts models in PostgreSQL.
 - `make dbt-test`: runs dbt schema tests plus a no-future-leakage assertion.
-- `make train`: trains baselines and XGBoost for 1-hour and 24-hour load forecasts.
-- `make evaluate`: prints model performance from `ml.model_performance`.
+- `make train`: trains baselines and XGBoost for 1-hour and 24-hour load forecasts, runs historical backtests, and applies champion/challenger promotion rules.
+- `make evaluate`: prints model performance, latest backtest summaries, and latest promotion decisions.
 - `make app`: starts the Streamlit dashboard.
+
+Pass dbt vars through the Makefile with `DBT_VARS='{"key": value}'`, for example to disable optional exogenous feature groups on a real load/price-only run.
+
+## Usage
+
+### Sample data
+
+Use sample data when you want a fully local smoke test, demo, or development workflow. Sample mode creates synthetic AESO-style load, pool price, weather forecast, generation availability, and intertie schedule fixtures.
+
+```bash
+make setup
+AESO_DATA_SOURCE=sample make ingest
+make dbt-run
+make dbt-test
+make train
+make evaluate
+make app
+```
+
+After `make app`, open the Streamlit URL printed in the terminal. The dashboard reads the warehouse tables built by dbt and the forecast outputs written by `make train`.
+
+### Real AESO historical data
+
+Use real AESO historical data when you want the forecasting pipeline trained and evaluated on actual historical Alberta Internal Load and pool price data. Historical mode downloads the public AESO historical CSV backfill and writes real load/price raw tables.
+
+If you do not have real weather forecast, generation availability, or intertie CSVs, use this load/price-only workflow. It keeps deterministic calendar and holiday features enabled, but disables optional exogenous groups so old sample optional feature tables in a reused local database cannot be joined to real historical rows.
+
+```bash
+make setup
+AESO_DATA_SOURCE=historical_csv make ingest
+make dbt-run DBT_VARS='{"enable_weather_features": false, "enable_generation_availability_features": false, "enable_intertie_features": false}'
+make dbt-test DBT_VARS='{"enable_weather_features": false, "enable_generation_availability_features": false, "enable_intertie_features": false}'
+make train
+make evaluate
+make app
+```
+
+### Real data with exogenous CSVs
+
+If you do have real known-as-of exogenous CSVs, set the CSV paths before ingestion and use the normal dbt run:
+
+```bash
+WEATHER_FORECAST_CSV_PATH=/path/to/weather_forecasts.csv \
+GENERATION_AVAILABILITY_CSV_PATH=/path/to/generation_availability.csv \
+INTERTIE_SCHEDULE_CSV_PATH=/path/to/intertie_schedules.csv \
+AESO_DATA_SOURCE=historical_csv make ingest
+
+make dbt-run
+make dbt-test
+make train
+make evaluate
+make app
+```
+
+The single-run forecast, performance, and feature-importance outputs are overwritten on each training run. The model registry preserves historical model records, while backtest results and promotion decisions are appended by run for auditability. If you switch between sample and real data, rerun the full sequence from ingestion through training so the marts, ML tables, and dashboard are all using the same data source.
 
 ## dbt Models
 
@@ -122,18 +177,39 @@ Models trained:
 - Baseline: rolling 24-hour average
 - XGBoost regressor
 
-Splits are time-based: approximately 70% train, 15% validation, and 15% test by target timestamp.
+The backward-compatible single-split outputs still use time-based splits: approximately 70% train, 15% validation, and 15% test by target timestamp.
+
+Model governance uses additional month-sized historical backtest windows. By default, `make train` evaluates the latest six eligible monthly windows with an expanding training history, requiring at least 90 days of training history and at least 7 days of test data per window. Set `MODEL_BACKTEST_MODE=rolling` to use a fixed rolling training history instead.
 
 ## Model Comparison
 
 `make train` writes:
 
-- `ml.model_registry`: model metadata and artifact locations.
+- `ml.model_registry`: model metadata, artifact locations, and preferred champion status.
 - `ml.forecast_results`: timestamp-level actuals, predictions, errors, and peak flags.
 - `ml.model_performance`: MAE, RMSE, MAPE, mean error, median absolute error, underprediction rate, and peak-period MAE.
 - `ml.feature_importance`: XGBoost feature importances.
+- `ml.model_backtest_results`: per-model, per-window backtest metrics with train/test window bounds and row counts.
+- `ml.model_promotion_decisions`: deterministic promotion/rejection decisions with rule settings and comparison details.
 
 Use `make evaluate` for a terminal summary or the Streamlit Model Comparison page for charts.
+
+Champion/challenger promotion is controlled by environment variables:
+
+- `MODEL_BACKTEST_ENABLED`: defaults to `true`.
+- `MODEL_BACKTEST_MODE`: `expanding` or `rolling`; defaults to `expanding`.
+- `MODEL_BACKTEST_MIN_TRAIN_DAYS`: defaults to `90`.
+- `MODEL_BACKTEST_ROLLING_TRAIN_DAYS`: defaults to `180`.
+- `MODEL_BACKTEST_MIN_TEST_DAYS`: defaults to `7`.
+- `MODEL_BACKTEST_MAX_WINDOWS`: defaults to `6`; set `0` for no cap.
+- `MODEL_PROMOTION_PRIMARY_METRIC`: `mae` or `rmse`; defaults to `mae`.
+- `MODEL_PROMOTION_MIN_RELATIVE_IMPROVEMENT`: defaults to `0.0`.
+- `MODEL_PROMOTION_MAX_PEAK_MAE_REGRESSION`: defaults to `0.05`.
+- `MODEL_PROMOTION_MAX_UNDERPREDICTION_RATE_REGRESSION`: defaults to `0.02`.
+- `MODEL_PROMOTION_MIN_WIN_RATE`: defaults to `0.5`.
+- `MODEL_PROMOTION_MIN_WINDOWS`: defaults to `3`.
+
+A challenger is promoted only when it improves the configured average primary metric versus the current preferred champion, does not exceed the peak-period and underprediction tolerances, wins or ties enough comparable windows, and has the minimum number of valid windows. If no champion exists yet, the initial champion is bootstrapped only after the minimum-window requirement is met.
 
 ## Streamlit App
 
@@ -167,12 +243,15 @@ Sample mode also writes deterministic known-as-of fixture tables by default:
 
 Set `AESO_WRITE_SAMPLE_FEATURE_SOURCES=false` to skip those optional sample feature fixtures.
 
-To load real AESO backfill data, set:
+To load real AESO backfill data without real exogenous weather, availability, or intertie files, use the load/price-only dbt build:
 
 ```bash
 AESO_DATA_SOURCE=historical_csv make ingest
-make dbt-run
-make dbt-test
+make dbt-run DBT_VARS='{"enable_weather_features": false, "enable_generation_availability_features": false, "enable_intertie_features": false}'
+make dbt-test DBT_VARS='{"enable_weather_features": false, "enable_generation_availability_features": false, "enable_intertie_features": false}'
+make train
+make evaluate
+make app
 ```
 
 Historical CSV mode downloads the AESO historical backfill files from the [AESO data request page](https://www.aeso.ca/market/market-and-system-reporting/data-requests/hourly-generation-metered-volumes-and-pool-price-and-ail-data-2001-to-july-2025/) for hourly generation metered volumes, pool price, and AIL data from 2001 to July 2025. It reads only `Date_Begin_GMT`, `ACTUAL_AIL`, and `ACTUAL_POOL_PRICE`, parses the timestamp as UTC, coerces load and price to numeric values, drops incomplete rows, and writes these existing raw table contracts:
@@ -227,6 +306,5 @@ Pytest coverage focuses on metric calculations, horizon-aware lag behavior, dete
 
 - Add AESO APIM ingestion and incremental raw loads.
 - Add live weather, outage, generation availability, and intertie connectors.
-- Add backtesting windows and champion/challenger promotion rules.
 - Add dbt exposures and source freshness checks.
 - Add scheduled retraining and forecast publishing jobs.

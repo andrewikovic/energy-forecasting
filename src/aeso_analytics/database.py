@@ -48,3 +48,21 @@ def write_dataframe(
         method="multi",
         chunksize=1000,
     )
+
+
+def replace_dataframe(engine: Engine, df: pd.DataFrame, schema: str, table: str) -> None:
+    """Drop and recreate a table when the DataFrame schema is allowed to evolve."""
+    if inspect(engine).has_table(table, schema=schema):
+        qualified_table = f"{_quote_identifier(schema)}.{_quote_identifier(table)}"
+        with engine.begin() as conn:
+            conn.execute(text(f"drop table {qualified_table}"))
+
+    df.to_sql(
+        table,
+        engine,
+        schema=schema,
+        if_exists="replace",
+        index=False,
+        method="multi",
+        chunksize=1000,
+    )

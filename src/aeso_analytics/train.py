@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import uuid
 from datetime import datetime, timezone
-from pathlib import Path
 
 import joblib
 import numpy as np
@@ -12,9 +11,21 @@ from sqlalchemy import text
 from sqlalchemy.exc import ProgrammingError
 from xgboost import XGBRegressor
 
-from aeso_analytics.config import PROJECT_ROOT
-from aeso_analytics.database import ensure_schemas, get_engine, write_dataframe
+from aeso_analytics.config import (
+    PROJECT_ROOT,
+    get_backtest_config,
+    get_promotion_rule_config,
+)
+from aeso_analytics.database import ensure_schemas, get_engine, replace_dataframe, write_dataframe
 from aeso_analytics.features import FEATURE_COLUMNS
+from aeso_analytics.governance import (
+    BacktestWindow,
+    apply_promotion_decisions,
+    current_champion_rows,
+    decide_promotions,
+    generate_backtest_windows,
+    normalize_model_registry,
+)
 from aeso_analytics.metrics import calculate_metrics
 
 
@@ -22,6 +33,17 @@ BASELINE_SPECS = {
     "baseline_same_hour_yesterday": "load_lag_24h",
     "baseline_same_hour_last_week": "load_lag_168h",
     "baseline_rolling_24h_average": "load_rolling_24h_avg",
+}
+
+XGBOOST_PARAMS = {
+    "n_estimators": 300,
+    "max_depth": 4,
+    "learning_rate": 0.05,
+    "subsample": 0.9,
+    "colsample_bytree": 0.9,
+    "objective": "reg:squarederror",
+    "random_state": 42,
+    "n_jobs": 4,
 }
 
 
@@ -60,6 +82,46 @@ def assign_time_splits(df: pd.DataFrame) -> pd.DataFrame:
         default="test",
     )
     return result
+
+
+def load_existing_model_registry(engine) -> pd.DataFrame:
+    try:
+        return pd.read_sql_query(text("select * from ml.model_registry"), engine)
+    except ProgrammingError:
+        return pd.DataFrame()
+
+
+def _json_dict(value: object) -> dict:
+    if isinstance(value, dict):
+        return value
+    if value is None or (isinstance(value, float) and np.isnan(value)):
+        return {}
+    try:
+        parsed = json.loads(str(value))
+    except (TypeError, json.JSONDecodeError, ValueError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _json_list(value: object, default: list[str]) -> list[str]:
+    if isinstance(value, list):
+        return [str(item) for item in value]
+    if value is None or (isinstance(value, float) and np.isnan(value)):
+        return default
+    try:
+        parsed = json.loads(str(value))
+    except (TypeError, json.JSONDecodeError, ValueError):
+        return default
+    if isinstance(parsed, list):
+        return [str(item) for item in parsed]
+    return default
+
+
+def build_xgboost(params: dict | None = None) -> XGBRegressor:
+    model_params = dict(XGBOOST_PARAMS)
+    if params:
+        model_params.update(params)
+    return XGBRegressor(**model_params)
 
 
 def append_forecasts_and_metrics(
@@ -116,10 +178,126 @@ def append_forecasts_and_metrics(
     )
 
 
+def _peak_threshold(train_df: pd.DataFrame, test_df: pd.DataFrame) -> float:
+    threshold = float(train_df["target_load_mw"].quantile(0.90))
+    if not (test_df["target_load_mw"] >= threshold).any():
+        threshold = float(test_df["target_load_mw"].quantile(0.90))
+    return threshold
+
+
+def _evaluate_backtest_window(
+    model_row: pd.Series,
+    horizon_df: pd.DataFrame,
+    window: BacktestWindow,
+    run_id: str,
+    evaluated_at: datetime,
+) -> dict | None:
+    train_df = horizon_df[
+        (horizon_df["target_timestamp_utc"] >= window.train_start)
+        & (horizon_df["target_timestamp_utc"] <= window.train_end)
+    ].copy()
+    test_df = horizon_df[
+        (horizon_df["target_timestamp_utc"] >= window.test_start)
+        & (horizon_df["target_timestamp_utc"] <= window.test_end)
+    ].copy()
+    if train_df.empty or test_df.empty:
+        return None
+
+    model_type = str(model_row["model_type"])
+    model_name = str(model_row["model_name"])
+    parameters = _json_dict(model_row.get("parameters"))
+    usable_test = test_df
+
+    if model_type == "baseline":
+        predictor_col = parameters.get("rule") or BASELINE_SPECS.get(model_name)
+        if predictor_col is None or predictor_col not in test_df.columns:
+            return None
+        usable_test = test_df[test_df[predictor_col].notna()].copy()
+        if usable_test.empty:
+            return None
+        predictions = usable_test[predictor_col]
+    elif model_type == "xgboost":
+        feature_names = _json_list(model_row.get("feature_names"), FEATURE_COLUMNS)
+        missing_features = [column for column in feature_names if column not in horizon_df.columns]
+        if missing_features:
+            return None
+        model = build_xgboost(parameters)
+        model.fit(
+            train_df[feature_names].astype(float),
+            train_df["target_load_mw"].astype(float),
+            verbose=False,
+        )
+        predictions = model.predict(usable_test[feature_names].astype(float))
+    else:
+        return None
+
+    threshold = _peak_threshold(train_df, usable_test)
+    metrics = calculate_metrics(
+        usable_test["target_load_mw"],
+        predictions,
+        threshold,
+    )
+    return {
+        "run_id": run_id,
+        "model_id": model_row["model_id"],
+        "model_name": model_name,
+        "model_type": model_type,
+        "horizon_hours": int(model_row["horizon_hours"]),
+        "window_id": window.window_id,
+        "backtest_mode": window.mode,
+        "train_start_timestamp_utc": train_df["target_timestamp_utc"].min(),
+        "train_end_timestamp_utc": train_df["target_timestamp_utc"].max(),
+        "test_start_timestamp_utc": test_df["target_timestamp_utc"].min(),
+        "test_end_timestamp_utc": test_df["target_timestamp_utc"].max(),
+        "train_row_count": int(len(train_df)),
+        "test_row_count": int(len(test_df)),
+        "prediction_row_count": int(len(usable_test)),
+        "peak_threshold_mw": threshold,
+        "evaluated_at": evaluated_at,
+        **metrics,
+    }
+
+
+def evaluate_backtests(
+    df: pd.DataFrame,
+    model_rows: pd.DataFrame,
+    run_id: str,
+    evaluated_at: datetime,
+) -> pd.DataFrame:
+    backtest_config = get_backtest_config()
+    if not backtest_config.enabled or model_rows.empty:
+        return pd.DataFrame()
+
+    rows: list[dict] = []
+    for horizon_hours in sorted(df["horizon_hours"].unique()):
+        horizon_df = df[df["horizon_hours"] == horizon_hours].copy()
+        windows = generate_backtest_windows(horizon_df, backtest_config)
+        if not windows:
+            continue
+
+        horizon_model_rows = model_rows[
+            model_rows["horizon_hours"].astype(int) == int(horizon_hours)
+        ]
+        for _, model_row in horizon_model_rows.iterrows():
+            for window in windows:
+                row = _evaluate_backtest_window(
+                    model_row,
+                    horizon_df,
+                    window,
+                    run_id,
+                    evaluated_at,
+                )
+                if row is not None:
+                    rows.append(row)
+
+    return pd.DataFrame(rows)
+
+
 def train_models() -> None:
     df = load_training_set()
     engine = get_engine()
     ensure_schemas(engine)
+    existing_registry = normalize_model_registry(load_existing_model_registry(engine))
     artifact_dir = PROJECT_ROOT / "models"
     artifact_dir.mkdir(parents=True, exist_ok=True)
 
@@ -130,6 +308,7 @@ def train_models() -> None:
 
     run_ts = datetime.now(timezone.utc)
     run_label = run_ts.strftime("%Y%m%dT%H%M%SZ")
+    run_id = str(uuid.uuid4())
 
     for horizon_hours in sorted(df["horizon_hours"].unique()):
         horizon_df = assign_time_splits(df[df["horizon_hours"] == horizon_hours].copy())
@@ -174,16 +353,7 @@ def train_models() -> None:
         model_name = "xgboost_regressor"
         x_train = train_df[FEATURE_COLUMNS].astype(float)
         y_train = train_df["target_load_mw"].astype(float)
-        xgb = XGBRegressor(
-            n_estimators=300,
-            max_depth=4,
-            learning_rate=0.05,
-            subsample=0.9,
-            colsample_bytree=0.9,
-            objective="reg:squarederror",
-            random_state=42,
-            n_jobs=4,
-        )
+        xgb = build_xgboost()
         xgb.fit(x_train, y_train, verbose=False)
 
         artifact_path = artifact_dir / f"xgboost_load_h{int(horizon_hours)}_{run_label}.joblib"
@@ -232,19 +402,58 @@ def train_models() -> None:
             )
 
     registry_df = pd.DataFrame(model_registry_rows)
+    registry_df["run_id"] = run_id
+    registry_df["is_preferred"] = False
+    registry_df["preferred_at"] = pd.NaT
+    registry_df["retired_at"] = pd.NaT
+    registry_df["promotion_decision_id"] = None
     forecasts_df = pd.concat(forecast_rows, ignore_index=True)
     performance_df = pd.DataFrame(performance_rows)
     importance_df = pd.DataFrame(importance_rows)
 
-    write_dataframe(engine, registry_df, "ml", "model_registry", if_exists="replace")
+    champion_registry = current_champion_rows(existing_registry)
+    backtest_model_rows = pd.concat(
+        [champion_registry, registry_df],
+        ignore_index=True,
+    )
+    backtest_df = evaluate_backtests(df, backtest_model_rows, run_id, run_ts)
+    promotion_rules = get_promotion_rule_config()
+    decisions_df, _promoted_by_horizon = decide_promotions(
+        existing_registry,
+        registry_df,
+        backtest_df,
+        promotion_rules,
+        run_id,
+        run_ts,
+    )
+    combined_registry = pd.concat(
+        [existing_registry, normalize_model_registry(registry_df)],
+        ignore_index=True,
+    )
+    combined_registry = apply_promotion_decisions(combined_registry, decisions_df, run_ts)
+
+    replace_dataframe(engine, combined_registry, "ml", "model_registry")
     write_dataframe(engine, forecasts_df, "ml", "forecast_results", if_exists="replace")
     write_dataframe(engine, performance_df, "ml", "model_performance", if_exists="replace")
     write_dataframe(engine, importance_df, "ml", "feature_importance", if_exists="replace")
+    if not backtest_df.empty:
+        write_dataframe(engine, backtest_df, "ml", "model_backtest_results", if_exists="append")
+    if not decisions_df.empty:
+        write_dataframe(
+            engine,
+            decisions_df,
+            "ml",
+            "model_promotion_decisions",
+            if_exists="append",
+        )
 
-    print(f"Registered {len(registry_df):,} model records")
+    print(f"Registered {len(registry_df):,} new model records")
+    print(f"Model registry contains {len(combined_registry):,} total records")
     print(f"Wrote {len(forecasts_df):,} forecast rows")
     print(f"Wrote {len(performance_df):,} model performance rows")
     print(f"Wrote {len(importance_df):,} feature importance rows")
+    print(f"Wrote {len(backtest_df):,} model backtest rows")
+    print(f"Wrote {len(decisions_df):,} promotion decision rows")
 
 
 def main() -> None:

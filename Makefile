@@ -6,6 +6,8 @@ PY := $(VENV)/bin/python
 PIP := $(VENV)/bin/pip
 DBT := $(VENV)/bin/dbt
 STREAMLIT := $(VENV)/bin/streamlit
+DBT_VARS ?=
+DBT_VAR_ARGS := $(if $(strip $(DBT_VARS)),--vars '$(DBT_VARS)',)
 
 -include .env
 
@@ -26,6 +28,20 @@ export AESO_WRITE_SAMPLE_FEATURE_SOURCES
 export WEATHER_FORECAST_CSV_PATH
 export GENERATION_AVAILABILITY_CSV_PATH
 export INTERTIE_SCHEDULE_CSV_PATH
+export MODEL_BACKTEST_ENABLED
+export MODEL_BACKTEST_MODE
+export MODEL_BACKTEST_MIN_TRAIN_DAYS
+export MODEL_BACKTEST_ROLLING_TRAIN_DAYS
+export MODEL_BACKTEST_MIN_TEST_DAYS
+export MODEL_BACKTEST_MIN_TRAIN_ROWS
+export MODEL_BACKTEST_MIN_TEST_ROWS
+export MODEL_BACKTEST_MAX_WINDOWS
+export MODEL_PROMOTION_PRIMARY_METRIC
+export MODEL_PROMOTION_MIN_RELATIVE_IMPROVEMENT
+export MODEL_PROMOTION_MAX_PEAK_MAE_REGRESSION
+export MODEL_PROMOTION_MAX_UNDERPREDICTION_RATE_REGRESSION
+export MODEL_PROMOTION_MIN_WIN_RATE
+export MODEL_PROMOTION_MIN_WINDOWS
 
 .PHONY: setup postgres-up ingest dbt-run dbt-test train evaluate app test clean
 
@@ -43,10 +59,10 @@ ingest:
 	$(PY) -m aeso_analytics.ingest
 
 dbt-run:
-	$(DBT) run --project-dir dbt --profiles-dir dbt
+	$(DBT) run --project-dir dbt --profiles-dir dbt $(DBT_VAR_ARGS)
 
 dbt-test:
-	$(DBT) test --project-dir dbt --profiles-dir dbt
+	$(DBT) test --project-dir dbt --profiles-dir dbt $(DBT_VAR_ARGS)
 
 train:
 	$(PY) -m aeso_analytics.train

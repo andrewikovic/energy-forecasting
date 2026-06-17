@@ -1,0 +1,37 @@
+version: 2
+
+models:
+  - name: mart_forecast_training_set
+    description: "Horizon-aware load forecasting training set with leakage-safe features."
+    columns:
+      - name: training_row_id
+        tests:
+          - not_null
+          - unique
+      - name: horizon_hours
+        tests:
+          - not_null
+      - name: feature_as_of_timestamp_utc
+        tests:
+          - not_null
+      - name: target_timestamp_utc
+        tests:
+          - not_null
+      - name: target_load_mw
+        tests:
+          - not_null
+
+  - name: mart_market_overview
+    description: "Hourly market overview table for dashboarding."
+    columns:
+      - name: timestamp_utc
+        tests:
+          - not_null
+          - unique
+
+  - name: mart_peak_demand_events
+    description: "Top five percent load hours for peak demand monitoring."
+    columns:
+      - name: timestamp_utc
+        tests:
+          - not_null

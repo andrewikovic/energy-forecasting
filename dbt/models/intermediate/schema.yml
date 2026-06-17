@@ -1,0 +1,26 @@
+version: 2
+
+models:
+  - name: int_load_features_hourly
+    description: "Hourly load with lag and as-of rolling load features."
+    columns:
+      - name: timestamp_utc
+        tests:
+          - not_null
+          - unique
+
+  - name: int_price_features_hourly
+    description: "Hourly pool price with lag and as-of rolling price features."
+    columns:
+      - name: timestamp_utc
+        tests:
+          - not_null
+          - unique
+
+  - name: int_energy_features_hourly
+    description: "Joined hourly market features for load, pool price, and calendar."
+    columns:
+      - name: timestamp_utc
+        tests:
+          - not_null
+          - unique

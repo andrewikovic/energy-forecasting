@@ -1,0 +1,53 @@
+version: 2
+
+sources:
+  - name: raw
+    schema: raw
+    tables:
+      - name: raw_aeso_load
+        columns:
+          - name: interval_start_utc
+            tests:
+              - not_null
+          - name: alberta_internal_load_mw
+            tests:
+              - not_null
+      - name: raw_aeso_pool_price
+        columns:
+          - name: interval_start_utc
+            tests:
+              - not_null
+          - name: pool_price_cad_mwh
+            tests:
+              - not_null
+
+models:
+  - name: stg_aeso_load
+    description: "Deduplicated hourly Alberta Internal Load observations."
+    columns:
+      - name: timestamp_utc
+        tests:
+          - not_null
+          - unique
+      - name: load_mw
+        tests:
+          - not_null
+
+  - name: stg_aeso_pool_price
+    description: "Deduplicated hourly AESO pool price observations."
+    columns:
+      - name: timestamp_utc
+        tests:
+          - not_null
+          - unique
+      - name: pool_price_cad_mwh
+        tests:
+          - not_null
+
+  - name: stg_calendar
+    description: "Hourly calendar spine covering the raw load date range."
+    columns:
+      - name: timestamp_utc
+        tests:
+          - not_null
+          - unique

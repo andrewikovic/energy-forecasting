@@ -20,6 +20,34 @@ models:
       - name: target_load_mw
         tests:
           - not_null
+      - name: is_stat_holiday
+        description: "Deterministic observed Alberta/Canada statutory holiday flag for the target local date."
+      - name: is_long_weekend
+        description: "Target local date is in a Friday-through-Monday long-weekend window."
+      - name: is_workday
+        description: "Target local date is neither a weekend nor an observed statutory holiday."
+      - name: weather_forecast_issue_utc
+        description: "Weather forecast issue timestamp selected as latest issue at or before feature_as_of_timestamp_utc."
+      - name: weather_forecast_target_utc
+        description: "Weather forecast target timestamp, expected to match target_timestamp_utc when populated."
+      - name: forecast_temperature_c
+        description: "Known-as-of average Alberta regional forecast temperature for the target hour."
+      - name: forecast_heating_degree_c
+        description: "Known-as-of heating degree signal derived from forecast temperature."
+      - name: forecast_cooling_degree_c
+        description: "Known-as-of cooling degree signal derived from forecast temperature."
+      - name: generation_availability_issue_utc
+        description: "Generation availability issue timestamp selected as latest issue at or before feature_as_of_timestamp_utc."
+      - name: available_capacity_total_mw
+        description: "Known-as-of available capacity summed across staged generation rows."
+      - name: outage_capacity_total_mw
+        description: "Known-as-of outage capacity summed across staged generation rows."
+      - name: intertie_schedule_issue_utc
+        description: "Intertie schedule issue timestamp selected as latest issue at or before feature_as_of_timestamp_utc."
+      - name: net_scheduled_import_mw
+        description: "Known-as-of scheduled imports minus scheduled exports for target hour."
+      - name: import_headroom_mw
+        description: "Known-as-of import transfer limit minus scheduled imports."
 
   - name: mart_market_overview
     description: "Hourly market overview table for dashboarding."

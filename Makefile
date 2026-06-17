@@ -22,6 +22,10 @@ export AESO_USE_SAMPLE_DATA
 export SAMPLE_START_UTC
 export SAMPLE_DAYS
 export SAMPLE_SEED
+export AESO_WRITE_SAMPLE_FEATURE_SOURCES
+export WEATHER_FORECAST_CSV_PATH
+export GENERATION_AVAILABILITY_CSV_PATH
+export INTERTIE_SCHEDULE_CSV_PATH
 
 .PHONY: setup postgres-up ingest dbt-run dbt-test train evaluate app test clean
 

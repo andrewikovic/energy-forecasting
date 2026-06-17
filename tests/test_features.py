@@ -1,6 +1,10 @@
 import pandas as pd
 
-from aeso_analytics.features import build_horizon_training_frame
+from aeso_analytics.features import (
+    OPTIONAL_KNOWN_AS_OF_FEATURE_COLUMNS,
+    add_calendar_features,
+    build_horizon_training_frame,
+)
 
 
 def hourly_fixture(rows: int = 240) -> pd.DataFrame:
@@ -47,3 +51,28 @@ def test_horizon_features_have_no_future_source_timestamp():
         assert (
             valid["feature_max_source_timestamp_utc"] <= valid["feature_as_of_timestamp_utc"]
         ).all()
+
+
+def test_calendar_features_include_alberta_holiday_flags():
+    frame = add_calendar_features(
+        pd.DataFrame(
+            {
+                "timestamp_utc": [
+                    pd.Timestamp("2024-01-01 08:00:00Z"),
+                    pd.Timestamp("2024-01-02 08:00:00Z"),
+                ]
+            }
+        )
+    )
+
+    assert frame["is_stat_holiday"].tolist() == [True, False]
+    assert frame["is_long_weekend"].tolist() == [True, False]
+    assert frame["is_workday"].tolist() == [False, True]
+
+
+def test_optional_known_as_of_features_default_to_null_without_external_inputs():
+    frame = build_horizon_training_frame(hourly_fixture(), horizon_hours=24)
+
+    for column in OPTIONAL_KNOWN_AS_OF_FEATURE_COLUMNS:
+        assert column in frame.columns
+        assert frame[column].isna().all()

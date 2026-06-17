@@ -3,8 +3,9 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from aeso_analytics.holidays import holiday_flags
 
-FEATURE_COLUMNS = [
+BASE_FEATURE_COLUMNS = [
     "hour",
     "day_of_week",
     "month",
@@ -18,14 +19,78 @@ FEATURE_COLUMNS = [
     "price_rolling_24h_avg",
 ]
 
+HOLIDAY_FEATURE_COLUMNS = [
+    "is_stat_holiday",
+    "is_alberta_stat_holiday",
+    "is_canada_stat_holiday",
+    "is_long_weekend",
+    "is_workday",
+    "is_non_workday",
+]
+
+WEATHER_FORECAST_FEATURE_COLUMNS = [
+    "weather_forecast_age_hours",
+    "weather_forecast_region_count",
+    "forecast_temperature_c",
+    "forecast_wind_speed_mps",
+    "forecast_relative_humidity_pct",
+    "forecast_precipitation_mm",
+    "forecast_heating_degree_c",
+    "forecast_cooling_degree_c",
+]
+
+GENERATION_AVAILABILITY_FEATURE_COLUMNS = [
+    "generation_availability_age_hours",
+    "generation_availability_fuel_type_count",
+    "available_capacity_total_mw",
+    "outage_capacity_total_mw",
+    "derated_capacity_total_mw",
+    "available_capacity_gas_mw",
+    "available_capacity_coal_mw",
+    "available_capacity_hydro_mw",
+    "available_capacity_wind_mw",
+    "available_capacity_solar_mw",
+    "available_capacity_storage_mw",
+    "available_capacity_other_mw",
+]
+
+INTERTIE_FEATURE_COLUMNS = [
+    "intertie_schedule_age_hours",
+    "intertie_count",
+    "scheduled_import_mw",
+    "scheduled_export_mw",
+    "net_scheduled_import_mw",
+    "import_transfer_limit_mw",
+    "export_transfer_limit_mw",
+    "intertie_constraint_mw",
+    "import_headroom_mw",
+    "export_headroom_mw",
+]
+
+OPTIONAL_KNOWN_AS_OF_FEATURE_COLUMNS = [
+    *WEATHER_FORECAST_FEATURE_COLUMNS,
+    *GENERATION_AVAILABILITY_FEATURE_COLUMNS,
+    *INTERTIE_FEATURE_COLUMNS,
+]
+
+FEATURE_COLUMNS = [
+    *BASE_FEATURE_COLUMNS,
+    *HOLIDAY_FEATURE_COLUMNS,
+    *OPTIONAL_KNOWN_AS_OF_FEATURE_COLUMNS,
+]
+
 
 def add_calendar_features(df: pd.DataFrame, timestamp_col: str = "timestamp_utc") -> pd.DataFrame:
     result = df.copy()
     ts = pd.to_datetime(result[timestamp_col], utc=True)
+    local_ts = ts.dt.tz_convert("America/Edmonton")
+    local_dates = list(local_ts.dt.date)
     result["hour"] = ts.dt.hour
     result["day_of_week"] = ts.dt.dayofweek
     result["month"] = ts.dt.month
     result["is_weekend"] = ts.dt.dayofweek >= 5
+    for column, values in holiday_flags(local_dates).items():
+        result[column] = values
     return result
 
 
@@ -101,6 +166,8 @@ def build_horizon_training_frame(
     result["price_rolling_24h_avg"] = result["feature_as_of_timestamp_utc"].map(
         asof["price_rolling_24h_avg"]
     )
+    for column in OPTIONAL_KNOWN_AS_OF_FEATURE_COLUMNS:
+        result[column] = np.nan
     result["feature_max_source_timestamp_utc"] = result["feature_as_of_timestamp_utc"]
 
     ordered = [

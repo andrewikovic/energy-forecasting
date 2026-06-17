@@ -4,11 +4,16 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 
 import pandas as pd
+from sqlalchemy import inspect
 from sqlalchemy.exc import OperationalError
 
 from aeso_analytics.config import get_ingestion_config
 from aeso_analytics.database import ensure_schemas, get_engine, write_dataframe
-from aeso_analytics.sample_data import generate_sample_aeso_data, write_sample_csvs
+from aeso_analytics.sample_data import (
+    generate_sample_aeso_data,
+    generate_sample_known_as_of_feature_data,
+    write_sample_csvs,
+)
 
 
 HISTORICAL_CSV_URLS = (
@@ -34,6 +39,40 @@ PRICE_RAW_COLUMNS = (
     "source",
     "ingested_at",
 )
+WEATHER_FORECAST_RAW_COLUMNS = (
+    "forecast_issue_utc",
+    "forecast_target_utc",
+    "region",
+    "temperature_c",
+    "wind_speed_mps",
+    "relative_humidity_pct",
+    "precipitation_mm",
+    "source",
+    "ingested_at",
+)
+GENERATION_AVAILABILITY_RAW_COLUMNS = (
+    "availability_issue_utc",
+    "availability_target_utc",
+    "fuel_type",
+    "unit_id",
+    "available_capacity_mw",
+    "derated_capacity_mw",
+    "outage_capacity_mw",
+    "source",
+    "ingested_at",
+)
+INTERTIE_SCHEDULE_RAW_COLUMNS = (
+    "schedule_issue_utc",
+    "schedule_target_utc",
+    "intertie_id",
+    "scheduled_import_mw",
+    "scheduled_export_mw",
+    "transfer_limit_import_mw",
+    "transfer_limit_export_mw",
+    "constraint_mw",
+    "source",
+    "ingested_at",
+)
 SUPPORTED_DATA_SOURCES = {"sample", "historical_csv"}
 
 
@@ -41,6 +80,13 @@ SUPPORTED_DATA_SOURCES = {"sample", "historical_csv"}
 class RawAesoTables:
     load: pd.DataFrame
     price: pd.DataFrame
+
+
+@dataclass(frozen=True)
+class RawKnownAsOfFeatureTables:
+    weather_forecasts: pd.DataFrame
+    generation_availability: pd.DataFrame
+    intertie_schedules: pd.DataFrame
 
 
 def _coerce_numeric(series: pd.Series) -> pd.Series:
@@ -88,6 +134,162 @@ def transform_historical_csv_data(
     )
 
 
+def _require_columns(frame: pd.DataFrame, required_columns: Iterable[str], label: str) -> None:
+    missing_columns = set(required_columns) - set(frame.columns)
+    if missing_columns:
+        missing = ", ".join(sorted(missing_columns))
+        raise ValueError(f"{label} data is missing required columns: {missing}")
+
+
+def _optional_text_column(frame: pd.DataFrame, column: str, default: str) -> pd.Series:
+    if column in frame.columns:
+        return frame[column].astype("string").str.strip().replace("", pd.NA).fillna(default)
+    return pd.Series(default, index=frame.index, dtype="string")
+
+
+def _optional_numeric_column(frame: pd.DataFrame, column: str) -> pd.Series:
+    if column in frame.columns:
+        return _coerce_numeric(frame[column])
+    return pd.Series(pd.NA, index=frame.index, dtype="Float64")
+
+
+def _normalized_required_text(frame: pd.DataFrame, column: str, default: str) -> pd.Series:
+    return (
+        frame[column]
+        .astype("string")
+        .str.lower()
+        .str.strip()
+        .replace("", pd.NA)
+        .fillna(default)
+    )
+
+
+def transform_weather_forecast_data(
+    frame: pd.DataFrame,
+    source: str = "external_weather_forecast_csv",
+    ingested_at: pd.Timestamp | None = None,
+) -> pd.DataFrame:
+    _require_columns(
+        frame,
+        ("forecast_issue_utc", "forecast_target_utc", "region"),
+        "Weather forecast",
+    )
+    ingested_at = ingested_at or pd.Timestamp.now(tz="UTC")
+    normalized = pd.DataFrame(
+        {
+            "forecast_issue_utc": pd.to_datetime(
+                frame["forecast_issue_utc"],
+                errors="coerce",
+                format="mixed",
+                utc=True,
+            ),
+            "forecast_target_utc": pd.to_datetime(
+                frame["forecast_target_utc"],
+                errors="coerce",
+                format="mixed",
+                utc=True,
+            ),
+            "region": _normalized_required_text(frame, "region", "alberta"),
+            "temperature_c": _optional_numeric_column(frame, "temperature_c"),
+            "wind_speed_mps": _optional_numeric_column(frame, "wind_speed_mps"),
+            "relative_humidity_pct": _optional_numeric_column(frame, "relative_humidity_pct"),
+            "precipitation_mm": _optional_numeric_column(frame, "precipitation_mm"),
+            "source": _optional_text_column(frame, "source", source),
+            "ingested_at": ingested_at,
+        }
+    )
+    normalized = normalized.dropna(
+        subset=["forecast_issue_utc", "forecast_target_utc", "region"]
+    ).copy()
+    return normalized.loc[:, WEATHER_FORECAST_RAW_COLUMNS].copy()
+
+
+def transform_generation_availability_data(
+    frame: pd.DataFrame,
+    source: str = "external_generation_availability_csv",
+    ingested_at: pd.Timestamp | None = None,
+) -> pd.DataFrame:
+    _require_columns(
+        frame,
+        ("availability_issue_utc", "availability_target_utc", "fuel_type"),
+        "Generation availability",
+    )
+    ingested_at = ingested_at or pd.Timestamp.now(tz="UTC")
+    normalized = pd.DataFrame(
+        {
+            "availability_issue_utc": pd.to_datetime(
+                frame["availability_issue_utc"],
+                errors="coerce",
+                format="mixed",
+                utc=True,
+            ),
+            "availability_target_utc": pd.to_datetime(
+                frame["availability_target_utc"],
+                errors="coerce",
+                format="mixed",
+                utc=True,
+            ),
+            "fuel_type": _normalized_required_text(frame, "fuel_type", "unknown"),
+            "unit_id": _optional_text_column(frame, "unit_id", "unreported"),
+            "available_capacity_mw": _optional_numeric_column(frame, "available_capacity_mw"),
+            "derated_capacity_mw": _optional_numeric_column(frame, "derated_capacity_mw"),
+            "outage_capacity_mw": _optional_numeric_column(frame, "outage_capacity_mw"),
+            "source": _optional_text_column(frame, "source", source),
+            "ingested_at": ingested_at,
+        }
+    )
+    normalized = normalized.dropna(
+        subset=["availability_issue_utc", "availability_target_utc", "fuel_type"]
+    ).copy()
+    normalized["unit_id"] = normalized["unit_id"].fillna("unreported")
+    return normalized.loc[:, GENERATION_AVAILABILITY_RAW_COLUMNS].copy()
+
+
+def transform_intertie_schedule_data(
+    frame: pd.DataFrame,
+    source: str = "external_intertie_schedule_csv",
+    ingested_at: pd.Timestamp | None = None,
+) -> pd.DataFrame:
+    _require_columns(
+        frame,
+        ("schedule_issue_utc", "schedule_target_utc", "intertie_id"),
+        "Intertie schedule",
+    )
+    ingested_at = ingested_at or pd.Timestamp.now(tz="UTC")
+    normalized = pd.DataFrame(
+        {
+            "schedule_issue_utc": pd.to_datetime(
+                frame["schedule_issue_utc"],
+                errors="coerce",
+                format="mixed",
+                utc=True,
+            ),
+            "schedule_target_utc": pd.to_datetime(
+                frame["schedule_target_utc"],
+                errors="coerce",
+                format="mixed",
+                utc=True,
+            ),
+            "intertie_id": _normalized_required_text(frame, "intertie_id", "unknown"),
+            "scheduled_import_mw": _optional_numeric_column(frame, "scheduled_import_mw"),
+            "scheduled_export_mw": _optional_numeric_column(frame, "scheduled_export_mw"),
+            "transfer_limit_import_mw": _optional_numeric_column(
+                frame, "transfer_limit_import_mw"
+            ),
+            "transfer_limit_export_mw": _optional_numeric_column(
+                frame, "transfer_limit_export_mw"
+            ),
+            "constraint_mw": _optional_numeric_column(frame, "constraint_mw"),
+            "source": _optional_text_column(frame, "source", source),
+            "ingested_at": ingested_at,
+        }
+    )
+    normalized = normalized.dropna(
+        subset=["schedule_issue_utc", "schedule_target_utc", "intertie_id"]
+    ).copy()
+    return normalized.loc[:, INTERTIE_SCHEDULE_RAW_COLUMNS].copy()
+
+
 def read_historical_csv_tables(urls: Iterable[str] = HISTORICAL_CSV_URLS) -> RawAesoTables:
     load_parts: list[pd.DataFrame] = []
     price_parts: list[pd.DataFrame] = []
@@ -122,7 +324,76 @@ def _write_raw_tables(engine, tables: RawAesoTables) -> None:
     write_dataframe(engine, tables.price, "raw", "raw_aeso_pool_price", if_exists="replace")
 
 
-def _run_sample_ingestion(engine, sample_cfg) -> None:
+def _write_known_as_of_feature_tables(engine, tables: RawKnownAsOfFeatureTables) -> None:
+    write_dataframe(
+        engine,
+        tables.weather_forecasts,
+        "raw",
+        "raw_weather_forecast_hourly",
+        if_exists="replace",
+    )
+    write_dataframe(
+        engine,
+        tables.generation_availability,
+        "raw",
+        "raw_generation_availability_hourly",
+        if_exists="replace",
+    )
+    write_dataframe(
+        engine,
+        tables.intertie_schedules,
+        "raw",
+        "raw_intertie_schedule_hourly",
+        if_exists="replace",
+    )
+
+
+def _write_configured_optional_feature_csvs(engine, feature_cfg) -> None:
+    if feature_cfg.weather_forecast_csv_path:
+        weather_df = transform_weather_forecast_data(
+            pd.read_csv(feature_cfg.weather_forecast_csv_path)
+        )
+        write_dataframe(
+            engine,
+            weather_df,
+            "raw",
+            "raw_weather_forecast_hourly",
+            if_exists="replace",
+        )
+        print(f"Wrote {len(weather_df):,} configured weather forecast rows")
+
+    if feature_cfg.generation_availability_csv_path:
+        generation_df = transform_generation_availability_data(
+            pd.read_csv(feature_cfg.generation_availability_csv_path)
+        )
+        write_dataframe(
+            engine,
+            generation_df,
+            "raw",
+            "raw_generation_availability_hourly",
+            if_exists="replace",
+        )
+        print(f"Wrote {len(generation_df):,} configured generation availability rows")
+
+    if feature_cfg.intertie_schedule_csv_path:
+        intertie_df = transform_intertie_schedule_data(
+            pd.read_csv(feature_cfg.intertie_schedule_csv_path)
+        )
+        write_dataframe(
+            engine,
+            intertie_df,
+            "raw",
+            "raw_intertie_schedule_hourly",
+            if_exists="replace",
+        )
+        print(f"Wrote {len(intertie_df):,} configured intertie schedule rows")
+
+
+def _raw_table_exists(engine, table: str) -> bool:
+    return inspect(engine).has_table(table, schema="raw")
+
+
+def _run_sample_ingestion(engine, sample_cfg, feature_cfg) -> None:
     load_df, price_df = generate_sample_aeso_data(
         start_utc=sample_cfg.start_utc,
         days=sample_cfg.days,
@@ -136,8 +407,27 @@ def _run_sample_ingestion(engine, sample_cfg) -> None:
     print(f"Wrote {len(price_df):,} pool price rows to raw.raw_aeso_pool_price")
     print(f"Sample CSVs: {load_path} and {price_path}")
 
+    if feature_cfg.write_sample_feature_sources:
+        weather_df, generation_df, intertie_df = generate_sample_known_as_of_feature_data(
+            load_df,
+            seed=sample_cfg.seed,
+        )
+        _write_known_as_of_feature_tables(
+            engine,
+            RawKnownAsOfFeatureTables(
+                weather_forecasts=weather_df,
+                generation_availability=generation_df,
+                intertie_schedules=intertie_df,
+            ),
+        )
+        print(f"Wrote {len(weather_df):,} weather forecast rows")
+        print(f"Wrote {len(generation_df):,} generation availability rows")
+        print(f"Wrote {len(intertie_df):,} intertie schedule rows")
 
-def _run_historical_csv_ingestion(engine) -> None:
+    _write_configured_optional_feature_csvs(engine, feature_cfg)
+
+
+def _run_historical_csv_ingestion(engine, feature_cfg) -> None:
     tables = read_historical_csv_tables()
     _write_raw_tables(engine, tables)
 
@@ -146,6 +436,17 @@ def _run_historical_csv_ingestion(engine) -> None:
     print(f"Wrote {len(tables.load):,} load rows to raw.raw_aeso_load")
     print(f"Wrote {len(tables.price):,} pool price rows to raw.raw_aeso_pool_price")
     print(f"Historical AESO CSV range: {start_utc} to {end_utc}")
+    _write_configured_optional_feature_csvs(engine, feature_cfg)
+
+    optional_raw_tables = (
+        "raw_weather_forecast_hourly",
+        "raw_generation_availability_hourly",
+        "raw_intertie_schedule_hourly",
+    )
+    missing_tables = [table for table in optional_raw_tables if not _raw_table_exists(engine, table)]
+    if missing_tables:
+        missing = ", ".join(missing_tables)
+        print(f"Optional known-as-of raw tables are not loaded: {missing}")
 
 
 def run_ingestion() -> None:
@@ -161,9 +462,9 @@ def run_ingestion() -> None:
     ensure_schemas(engine)
 
     if ingest_cfg.data_source == "sample":
-        _run_sample_ingestion(engine, ingest_cfg.sample_data)
+        _run_sample_ingestion(engine, ingest_cfg.sample_data, ingest_cfg.external_features)
     elif ingest_cfg.data_source == "historical_csv":
-        _run_historical_csv_ingestion(engine)
+        _run_historical_csv_ingestion(engine, ingest_cfg.external_features)
 
 
 def main() -> None:

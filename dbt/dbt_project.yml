@@ -12,6 +12,11 @@ clean-targets:
   - "target"
   - "dbt_packages"
 
+vars:
+  enable_weather_features: true
+  enable_generation_availability_features: true
+  enable_intertie_features: true
+
 models:
   aeso_load_forecasting:
     staging:

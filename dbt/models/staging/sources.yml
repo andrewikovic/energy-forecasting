@@ -20,6 +20,41 @@ sources:
           - name: pool_price_cad_mwh
             tests:
               - not_null
+      - name: raw_weather_forecast_hourly
+        description: >
+          Optional weather forecast snapshots. Rows must represent forecast values
+          known at forecast_issue_utc for forecast_target_utc, not future observed weather.
+        columns:
+          - name: forecast_issue_utc
+            description: "Timestamp when the weather forecast was issued or became known."
+          - name: forecast_target_utc
+            description: "Hourly timestamp the forecast describes."
+          - name: region
+            description: "Alberta weather region, station group, or province-level aggregate."
+      - name: raw_generation_availability_hourly
+        description: >
+          Optional generation availability or outage snapshots known as of
+          availability_issue_utc for availability_target_utc.
+        columns:
+          - name: availability_issue_utc
+            description: "Timestamp when the availability/outage signal was known."
+          - name: availability_target_utc
+            description: "Hourly operating timestamp the availability signal describes."
+          - name: fuel_type
+            description: "Fuel type such as gas, coal, hydro, wind, solar, storage, or other."
+          - name: unit_id
+            description: "Unit identifier when source data supports unit-level availability."
+      - name: raw_intertie_schedule_hourly
+        description: >
+          Optional intertie schedule, limit, and constraint snapshots known as of
+          schedule_issue_utc for schedule_target_utc. These are not finalized future actual flows.
+        columns:
+          - name: schedule_issue_utc
+            description: "Timestamp when the intertie schedule or limit was published."
+          - name: schedule_target_utc
+            description: "Hourly operating timestamp the intertie row describes."
+          - name: intertie_id
+            description: "Intertie identifier such as bc, sk, or mt."
 
 models:
   - name: stg_aeso_load
@@ -45,9 +80,63 @@ models:
           - not_null
 
   - name: stg_calendar
-    description: "Hourly calendar spine covering the raw load date range."
+    description: "Hourly calendar spine covering the raw load date range with deterministic Alberta/Canada holiday flags."
     columns:
       - name: timestamp_utc
         tests:
           - not_null
           - unique
+      - name: is_stat_holiday
+        description: "True when the Alberta-local date is an observed Alberta or Canada statutory holiday."
+      - name: is_long_weekend
+        description: "True for Friday-through-Monday windows around observed Friday or Monday statutory holidays."
+      - name: is_workday
+        description: "True when the Alberta-local date is neither a weekend nor an observed statutory holiday."
+
+  - name: stg_weather_forecasts
+    description: "Deduplicated hourly weather forecast snapshots by issue time, target time, and Alberta region."
+    columns:
+      - name: forecast_issue_utc
+        tests:
+          - not_null
+      - name: forecast_target_utc
+        tests:
+          - not_null
+      - name: region
+        tests:
+          - not_null
+      - name: forecast_horizon_hours
+        description: "Target minus issue timestamp in hours."
+      - name: heating_degree_c
+        description: "Forecast heating degree signal using an 18 C base."
+      - name: cooling_degree_c
+        description: "Forecast cooling degree signal using an 18 C base."
+
+  - name: stg_generation_availability
+    description: "Deduplicated known-as-of generation availability snapshots by issue time, target time, fuel type, and unit."
+    columns:
+      - name: availability_issue_utc
+        tests:
+          - not_null
+      - name: availability_target_utc
+        tests:
+          - not_null
+      - name: fuel_type
+        tests:
+          - not_null
+      - name: unit_id
+        tests:
+          - not_null
+
+  - name: stg_intertie_schedules
+    description: "Deduplicated known-as-of intertie schedule, transfer limit, and constraint snapshots."
+    columns:
+      - name: schedule_issue_utc
+        tests:
+          - not_null
+      - name: schedule_target_utc
+        tests:
+          - not_null
+      - name: intertie_id
+        tests:
+          - not_null

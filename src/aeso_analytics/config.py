@@ -18,7 +18,7 @@ DEFAULT_SAMPLE_SEED = 42
 
 def _env_bool(name: str, default: bool) -> bool:
     value = os.getenv(name)
-    if value is None:
+    if value is None or value.strip() == "":
         return default
     return value.strip().lower() in {"1", "true", "t", "yes", "y", "on"}
 
@@ -59,9 +59,18 @@ class SampleDataConfig:
 
 
 @dataclass(frozen=True)
+class ExternalFeatureConfig:
+    weather_forecast_csv_path: str | None
+    generation_availability_csv_path: str | None
+    intertie_schedule_csv_path: str | None
+    write_sample_feature_sources: bool
+
+
+@dataclass(frozen=True)
 class IngestionConfig:
     data_source: str
     sample_data: SampleDataConfig
+    external_features: ExternalFeatureConfig
 
 
 def _default_sample_data_config() -> SampleDataConfig:
@@ -92,8 +101,25 @@ def get_sample_data_config() -> SampleDataConfig:
     )
 
 
+def _optional_path_env(name: str) -> str | None:
+    value = os.getenv(name)
+    if value is None or value.strip() == "":
+        return None
+    return value.strip()
+
+
+def get_external_feature_config() -> ExternalFeatureConfig:
+    return ExternalFeatureConfig(
+        weather_forecast_csv_path=_optional_path_env("WEATHER_FORECAST_CSV_PATH"),
+        generation_availability_csv_path=_optional_path_env("GENERATION_AVAILABILITY_CSV_PATH"),
+        intertie_schedule_csv_path=_optional_path_env("INTERTIE_SCHEDULE_CSV_PATH"),
+        write_sample_feature_sources=_env_bool("AESO_WRITE_SAMPLE_FEATURE_SOURCES", True),
+    )
+
+
 def get_ingestion_config() -> IngestionConfig:
     data_source = os.getenv("AESO_DATA_SOURCE")
+    external_features = get_external_feature_config()
     if data_source is not None and data_source.strip():
         normalized_source = data_source.strip().lower()
         sample_cfg = (
@@ -104,10 +130,12 @@ def get_ingestion_config() -> IngestionConfig:
         return IngestionConfig(
             data_source=normalized_source,
             sample_data=sample_cfg,
+            external_features=external_features,
         )
 
     sample_cfg = get_sample_data_config()
     return IngestionConfig(
         data_source="sample" if sample_cfg.use_sample_data else "historical_csv",
         sample_data=sample_cfg,
+        external_features=external_features,
     )

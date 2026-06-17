@@ -22,9 +22,9 @@ Streamlit analytics dashboard
 
 Schemas:
 
-- `raw`: ingested load and pool price tables.
+- `raw`: ingested load, pool price, and optional known-as-of weather, generation availability, and intertie tables.
 - `staging`: deduplicated and typed source models.
-- `intermediate`: hourly load, price, calendar, lag, and rolling features.
+- `intermediate`: hourly load, price, calendar, holiday, lag, rolling, weather forecast, generation availability, and intertie features.
 - `marts`: training, market overview, and peak demand marts.
 - `ml`: model registry, forecast results, model performance, and feature importance.
 
@@ -65,7 +65,7 @@ make app
 
 What each command does:
 
-- `make ingest`: loads the configured AESO data source and writes `raw.raw_aeso_load` and `raw.raw_aeso_pool_price`.
+- `make ingest`: loads the configured AESO data source and writes `raw.raw_aeso_load`, `raw.raw_aeso_pool_price`, and optional known-as-of feature raw tables when sample fixtures or CSV paths are configured.
 - `make dbt-run`: builds staging, intermediate, and marts models in PostgreSQL.
 - `make dbt-test`: runs dbt schema tests plus a no-future-leakage assertion.
 - `make train`: trains baselines and XGBoost for 1-hour and 24-hour load forecasts.
@@ -78,13 +78,19 @@ Staging models:
 
 - `stg_aeso_load`: typed and deduplicated hourly Alberta Internal Load.
 - `stg_aeso_pool_price`: typed and deduplicated hourly pool price.
-- `stg_calendar`: hourly calendar spine with hour, day of week, month, and weekend flag.
+- `stg_calendar`: hourly calendar spine with hour, day of week, month, weekend, Alberta-local holiday, long-weekend, and workday flags.
+- `stg_weather_forecasts`: optional weather forecast snapshots by issue time, target time, and Alberta region.
+- `stg_generation_availability`: optional known-as-of generation availability or outage snapshots by fuel type and unit.
+- `stg_intertie_schedules`: optional known-as-of intertie schedules, transfer limits, and constraints.
 
 Intermediate models:
 
 - `int_load_features_hourly`: load lags and rolling load averages.
 - `int_price_features_hourly`: pool price lag and rolling price average.
-- `int_energy_features_hourly`: joined hourly load, price, and calendar features.
+- `int_energy_features_hourly`: joined hourly load, price, calendar, and holiday features.
+- `int_weather_forecast_features_hourly`: Alberta aggregate weather forecast features by issue and target hour.
+- `int_generation_availability_features_hourly`: available capacity and outage features by issue and target hour.
+- `int_intertie_features_hourly`: scheduled import/export, transfer limit, constraint, and headroom features by issue and target hour.
 
 Marts:
 
@@ -97,11 +103,17 @@ Marts:
 The training mart includes the required forecasting features:
 
 - hour, day of week, month, weekend flag
+- Alberta/Canada statutory holiday, long-weekend, workday, and non-workday flags
 - load lag 1h, 24h, 168h
 - rolling 24h and 168h load averages
 - price lag 24h and rolling 24h price average
+- forecast weather: temperature, wind, humidity, precipitation, heating degree, cooling degree, forecast age, and contributing region count
+- generation availability: total available, outage, derated, and available capacity by major fuel type
+- intertie schedules: scheduled imports/exports, net scheduled imports, transfer limits, constraints, and headroom
 
 The mart is horizon-aware to avoid future leakage. Calendar features describe the target hour because they are known in advance. Lag features are only populated when the source timestamp is known at or before the forecast issue time. For example, `load_lag_1h` is valid for the 1-hour-ahead model but intentionally null for the 24-hour-ahead model. Rolling features are calculated as of the issue timestamp.
+
+Weather, generation availability, and intertie features are joined as known-as-of snapshots. For each target hour and forecast horizon, dbt selects the latest row whose issue timestamp is less than or equal to `feature_as_of_timestamp_utc` and whose target timestamp equals `target_timestamp_utc`. These columns intentionally use weather forecasts rather than future observed weather, availability/outage information known by the issue time, and published intertie schedules or limits rather than finalized future actual flows.
 
 Models trained:
 
@@ -147,6 +159,14 @@ SAMPLE_SEED=42
 
 Sample ingestion writes generated CSVs to `data/raw/` and loads the same PostgreSQL raw tables consumed by dbt.
 
+Sample mode also writes deterministic known-as-of fixture tables by default:
+
+- `raw.raw_weather_forecast_hourly`
+- `raw.raw_generation_availability_hourly`
+- `raw.raw_intertie_schedule_hourly`
+
+Set `AESO_WRITE_SAMPLE_FEATURE_SOURCES=false` to skip those optional sample feature fixtures.
+
 To load real AESO backfill data, set:
 
 ```bash
@@ -162,6 +182,31 @@ Historical CSV mode downloads the AESO historical backfill files from the [AESO 
 
 No AESO API key is required for historical CSV ingestion. `AESO_USE_SAMPLE_DATA=false` remains supported as a legacy fallback to `historical_csv` only when `AESO_DATA_SOURCE` is not set.
 
+Optional real feature inputs can be loaded from CSVs during `make ingest`:
+
+```text
+WEATHER_FORECAST_CSV_PATH=/path/to/weather_forecasts.csv
+GENERATION_AVAILABILITY_CSV_PATH=/path/to/generation_availability.csv
+INTERTIE_SCHEDULE_CSV_PATH=/path/to/intertie_schedules.csv
+```
+
+Weather CSV contract:
+
+- `forecast_issue_utc`, `forecast_target_utc`, `region`
+- optional numeric columns: `temperature_c`, `wind_speed_mps`, `relative_humidity_pct`, `precipitation_mm`
+
+Generation availability CSV contract:
+
+- `availability_issue_utc`, `availability_target_utc`, `fuel_type`
+- optional columns: `unit_id`, `available_capacity_mw`, `derated_capacity_mw`, `outage_capacity_mw`
+
+Intertie schedule CSV contract:
+
+- `schedule_issue_utc`, `schedule_target_utc`, `intertie_id`
+- optional numeric columns: `scheduled_import_mw`, `scheduled_export_mw`, `transfer_limit_import_mw`, `transfer_limit_export_mw`, `constraint_mw`
+
+All optional CSV rows may include `source`; ingestion stamps `ingested_at`. If optional raw tables are absent, the dbt staging models return empty typed relations and the final mart keeps the new optional feature columns null. The optional dbt feature groups can also be disabled with `--vars '{"enable_weather_features": false}'`, `enable_generation_availability_features`, or `enable_intertie_features`.
+
 ## Tests
 
 ```bash
@@ -169,19 +214,19 @@ pytest
 make dbt-test
 ```
 
-Pytest coverage focuses on metric calculations, horizon-aware lag behavior, and no-future-source timestamp checks. dbt tests cover source/model integrity and a warehouse-level no-leakage assertion.
+Pytest coverage focuses on metric calculations, horizon-aware lag behavior, deterministic holiday logic, optional source transforms, and no-future-source timestamp checks. dbt tests cover source/model integrity, holiday correctness, optional feature grain, target alignment, and warehouse-level no-leakage assertions.
 
 ## Limitations
 
 - AESO APIM/API-key live ingestion is not implemented in the MVP.
 - Sample data is realistic but synthetic, so sample-mode model scores are demonstration metrics.
-- Weather, outage, generation stack, imports/exports, and holiday features are not included.
+- Real weather, outage, generation availability, and intertie feeds must be supplied through the documented raw tables or optional CSV contracts.
 - Forecasting uses batch training only; there is no scheduler or model serving endpoint.
 
 ## Future Improvements
 
 - Add AESO APIM ingestion and incremental raw loads.
-- Add weather forecasts, holidays, generation availability, and intertie features.
+- Add live weather, outage, generation availability, and intertie connectors.
 - Add backtesting windows and champion/challenger promotion rules.
 - Add dbt exposures and source freshness checks.
 - Add scheduled retraining and forecast publishing jobs.

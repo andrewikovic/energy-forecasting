@@ -18,9 +18,55 @@ models:
           - unique
 
   - name: int_energy_features_hourly
-    description: "Joined hourly market features for load, pool price, and calendar."
+    description: "Joined hourly market features for load, pool price, calendar, and deterministic holiday flags."
     columns:
       - name: timestamp_utc
         tests:
           - not_null
           - unique
+
+  - name: int_weather_forecast_features_hourly
+    description: "Alberta-region aggregated weather forecasts by forecast issue hour and target hour."
+    columns:
+      - name: forecast_issue_utc
+        tests:
+          - not_null
+      - name: forecast_target_utc
+        tests:
+          - not_null
+      - name: weather_forecast_region_count
+        description: "Number of regional forecast rows contributing to the aggregate."
+      - name: forecast_temperature_c
+        description: "Average forecast temperature across staged Alberta regions."
+      - name: forecast_heating_degree_c
+        description: "Average forecast heating degree signal using an 18 C base."
+      - name: forecast_cooling_degree_c
+        description: "Average forecast cooling degree signal using an 18 C base."
+
+  - name: int_generation_availability_features_hourly
+    description: "Generation availability and outage features aggregated from unit or fuel-type snapshots by issue and target hour."
+    columns:
+      - name: availability_issue_utc
+        tests:
+          - not_null
+      - name: availability_target_utc
+        tests:
+          - not_null
+      - name: available_capacity_total_mw
+        description: "Known-as-of available capacity summed across staged units or fuel types."
+      - name: outage_capacity_total_mw
+        description: "Known-as-of outage capacity summed across staged units or fuel types."
+
+  - name: int_intertie_features_hourly
+    description: "Known-as-of intertie schedule, transfer limit, net import, and headroom features by issue and target hour."
+    columns:
+      - name: schedule_issue_utc
+        tests:
+          - not_null
+      - name: schedule_target_utc
+        tests:
+          - not_null
+      - name: net_scheduled_import_mw
+        description: "Scheduled imports minus scheduled exports using values known at schedule_issue_utc."
+      - name: import_headroom_mw
+        description: "Published import transfer limit minus scheduled imports."

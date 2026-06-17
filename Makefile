@@ -17,6 +17,11 @@ export POSTGRES_DB
 export POSTGRES_USER
 export POSTGRES_PASSWORD
 export DBT_TARGET
+export AESO_DATA_SOURCE
+export AESO_USE_SAMPLE_DATA
+export SAMPLE_START_UTC
+export SAMPLE_DAYS
+export SAMPLE_SEED
 
 .PHONY: setup postgres-up ingest dbt-run dbt-test train evaluate app test clean
 

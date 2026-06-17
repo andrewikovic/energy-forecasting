@@ -5,7 +5,7 @@ Reproducible analytics engineering and machine learning MVP for forecasting hour
 ## Architecture
 
 ```text
-sample AESO-style fixtures
+sample AESO-style fixtures or AESO historical CSV backfill
         |
         v
 Python ingestion -> PostgreSQL raw schema
@@ -65,7 +65,7 @@ make app
 
 What each command does:
 
-- `make ingest`: generates deterministic AESO-style hourly sample data and writes `raw.raw_aeso_load` and `raw.raw_aeso_pool_price`.
+- `make ingest`: loads the configured AESO data source and writes `raw.raw_aeso_load` and `raw.raw_aeso_pool_price`.
 - `make dbt-run`: builds staging, intermediate, and marts models in PostgreSQL.
 - `make dbt-test`: runs dbt schema tests plus a no-future-leakage assertion.
 - `make train`: trains baselines and XGBoost for 1-hour and 24-hour load forecasts.
@@ -134,9 +134,33 @@ The dashboard includes:
 5. Peak Demand Monitor: top load hours and underprediction during peaks.
 6. Data Quality: record counts, date ranges, missing hours, duplicates, nulls, latest ingestion.
 
-## Local Data
+## Data Ingestion
 
-The MVP uses deterministic sample fixtures by default so it can run without manual AESO data collection. Generated CSVs are written to `data/raw/` during ingestion and loaded to PostgreSQL. To replace sample data with live ingestion, extend `src/aeso_analytics/ingest.py` while keeping the raw table contracts.
+The project uses deterministic sample fixtures by default so it can run without network access or manual AESO data collection:
+
+```text
+AESO_DATA_SOURCE=sample
+SAMPLE_START_UTC=2024-01-01T00:00:00Z
+SAMPLE_DAYS=240
+SAMPLE_SEED=42
+```
+
+Sample ingestion writes generated CSVs to `data/raw/` and loads the same PostgreSQL raw tables consumed by dbt.
+
+To load real AESO backfill data, set:
+
+```bash
+AESO_DATA_SOURCE=historical_csv make ingest
+make dbt-run
+make dbt-test
+```
+
+Historical CSV mode downloads the AESO historical backfill files from the [AESO data request page](https://www.aeso.ca/market/market-and-system-reporting/data-requests/hourly-generation-metered-volumes-and-pool-price-and-ail-data-2001-to-july-2025/) for hourly generation metered volumes, pool price, and AIL data from 2001 to July 2025. It reads only `Date_Begin_GMT`, `ACTUAL_AIL`, and `ACTUAL_POOL_PRICE`, parses the timestamp as UTC, coerces load and price to numeric values, drops incomplete rows, and writes these existing raw table contracts:
+
+- `raw.raw_aeso_load`: `interval_start_utc`, `alberta_internal_load_mw`, `source`, `ingested_at`
+- `raw.raw_aeso_pool_price`: `interval_start_utc`, `pool_price_cad_mwh`, `source`, `ingested_at`
+
+No AESO API key is required for historical CSV ingestion. `AESO_USE_SAMPLE_DATA=false` remains supported as a legacy fallback to `historical_csv` only when `AESO_DATA_SOURCE` is not set.
 
 ## Tests
 
@@ -149,14 +173,14 @@ Pytest coverage focuses on metric calculations, horizon-aware lag behavior, and 
 
 ## Limitations
 
-- Live AESO API ingestion is not implemented in the MVP.
-- Sample data is realistic but synthetic, so model scores are demonstration metrics.
+- AESO APIM/API-key live ingestion is not implemented in the MVP.
+- Sample data is realistic but synthetic, so sample-mode model scores are demonstration metrics.
 - Weather, outage, generation stack, imports/exports, and holiday features are not included.
 - Forecasting uses batch training only; there is no scheduler or model serving endpoint.
 
 ## Future Improvements
 
-- Add live AESO data ingestion and incremental raw loads.
+- Add AESO APIM ingestion and incremental raw loads.
 - Add weather forecasts, holidays, generation availability, and intertie features.
 - Add backtesting windows and champion/challenger promotion rules.
 - Add dbt exposures and source freshness checks.

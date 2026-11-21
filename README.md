@@ -42,7 +42,25 @@ On macOS, XGBoost may require the OpenMP runtime:
 brew install libomp
 ```
 
-If Docker is unavailable, start PostgreSQL manually and set these values in `.env`:
+### PostgreSQL with Podman
+
+If you use Podman, run this after `make setup`. The container uses the default database settings from `.env.example`.
+
+```bash
+podman run -d --name aeso_analytics_postgres \
+  -p 127.0.0.1:55432:5432 \
+  -e POSTGRES_DB=aeso_analytics \
+  -e POSTGRES_USER=aeso \
+  -e POSTGRES_PASSWORD=aeso \
+  -v aeso_postgres_data:/var/lib/postgresql/data \
+  docker.io/library/postgres:16
+```
+
+For an existing stopped container, run `podman start aeso_analytics_postgres`.
+
+### PostgreSQL without a container
+
+Start PostgreSQL manually and set these values in `.env` to match your instance:
 
 ```text
 POSTGRES_HOST=localhost
@@ -51,6 +69,23 @@ POSTGRES_DB=aeso_analytics
 POSTGRES_USER=aeso
 POSTGRES_PASSWORD=aeso
 ```
+
+### Check PostgreSQL readiness
+
+A running container can still be initializing PostgreSQL. Before running `make ingest`, check that PostgreSQL reports **accepting connections** using the command for your setup.
+
+```bash
+# Docker Compose
+docker compose exec postgres pg_isready -U aeso -d aeso_analytics
+
+# Podman
+podman exec aeso_analytics_postgres pg_isready -U aeso -d aeso_analytics
+
+# Local PostgreSQL
+pg_isready -h localhost -p 55432 -U aeso -d aeso_analytics
+```
+
+These commands use the default settings. If PostgreSQL is still starting, retry the check after a few seconds. If you chain the workflow with `&&`, an ingestion failure skips dbt, training, and Streamlit. Open the dashboard after `make app` prints its local URL.
 
 ## Command Workflow
 

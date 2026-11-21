@@ -305,21 +305,22 @@ def model_comparison() -> None:
         index=split_options.index("test") if "test" in split_options else 0,
     )
     selected = performance[performance["evaluation_split"] == split].copy()
+    chart_data = selected.assign(Horizon=selected["horizon_hours"].astype(str) + "h")
 
     left, middle, right = st.columns(3)
     with left:
         st.plotly_chart(
-            px.bar(selected, x="model_name", y="mae", color="horizon_hours", barmode="group", title="MAE"),
+            px.bar(chart_data, x="model_name", y="mae", color="Horizon", barmode="group", title="MAE"),
             width="stretch",
         )
     with middle:
         st.plotly_chart(
-            px.bar(selected, x="model_name", y="rmse", color="horizon_hours", barmode="group", title="RMSE"),
+            px.bar(chart_data, x="model_name", y="rmse", color="Horizon", barmode="group", title="RMSE"),
             width="stretch",
         )
     with right:
         st.plotly_chart(
-            px.bar(selected, x="model_name", y="mape", color="horizon_hours", barmode="group", title="MAPE"),
+            px.bar(chart_data, x="model_name", y="mape", color="Horizon", barmode="group", title="MAPE"),
             width="stretch",
         )
 
